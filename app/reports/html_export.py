@@ -1,0 +1,124 @@
+"""Standalone HTML report (self-contained, dark, no external assets)."""
+
+from __future__ import annotations
+
+import html
+from typing import Optional
+
+from app.models.scan_result import ScanResult
+
+# colour usage stays black/white/red for consistency with the app.
+_CSS = """
+:root{--bg:#050505;--panel:#0b0b0b;--line:#222;--txt:#d6d6d6;--dim:#888;--red:#E53935;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--txt);font:13px/1.45 'Segoe UI',system-ui,sans-serif;margin:0;padding:24px}
+h1{font-size:20px;margin:0 0 4px;color:#fff;letter-spacing:1px}
+h2{font-size:14px;color:var(--red);border-bottom:1px solid var(--line);padding-bottom:6px;margin:28px 0 12px;text-transform:uppercase;letter-spacing:1.5px}
+.summary{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+.stat{border:1px solid var(--line);background:var(--panel);padding:10px 14px;min-width:120px}
+.stat b{display:block;font-size:22px;color:#fff}
+table{border-collapse:collapse;width:100%;margin-top:8px}
+th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;font-size:12px}
+th{background:var(--panel);color:#fff;text-transform:uppercase;letter-spacing:.5px;font-size:11px}
+tr:nth-child(even){background:var(--panel)}
+.warn{color:var(--red)}
+.dim{color:var(--dim)}
+.mono{font-family:Consolas,monospace;font-size:11px;word-break:break-all}
+.missing{color:var(--red)}
+"""
+
+
+def _esc(value) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def render_html(result: ScanResult) -> str:
+    counts = result.count_by_source()
+    parts = []
+    parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+    parts.append("<title>PersistMap Report</title><style>" + _CSS + "</style></head><body>")
+    parts.append("<h1>PersistMap - Windows Persistence Inventory</h1>")
+    parts.append("<div class='dim'>Offline read-only forensics report &middot; generated locally</div>")
+
+    parts.append("<h2>Run Information</h2>")
+    parts.append("<table>")
+    for label, value in [
+        ("Scan ID", result.scan_id),
+        ("Started", result.scan_started),
+        ("Finished", result.scan_finished or "n/a"),
+        ("Computer", result.computer_name),
+        ("OS", f"{result.os_name} {result.os_version} ({result.os_architecture})"),
+        ("Tool", f"PersistMap {result.tool_version}"),
+        ("Privilege", result.privilege),
+    ]:
+        parts.append(f"<tr><th>{_esc(label)}</th><td>{_esc(value)}</td></tr>")
+    parts.append("</table>")
+
+    parts.append("<h2>Collection Status</h2>")
+    parts.append("<table><tr><th>Source</th><th>Status</th><th>Entries</th><th>Detail</th></tr>")
+    for s in result.sources:
+        cls = "warn" if str(s.status) not in ("Complete",) else ""
+        parts.append(f"<tr><td>{_esc(s.source)}</td>"
+                     f"<td class='{cls}'>{_esc(s.status)}</td>"
+                     f"<td>{s.entry_count}</td><td>{_esc(s.detail)}</td></tr>")
+    parts.append("</table>")
+
+    if result.problems:
+        parts.append("<h2>Problems</h2><table><tr><th>Source</th><th>Level</th><th>Message</th></tr>")
+        for p in result.problems:
+            parts.append(f"<tr><td>{_esc(p.source)}</td><td class='warn'>{_esc(p.level)}</td>"
+                         f"<td>{_esc(p.message)}</td></tr>")
+        parts.append("</table>")
+
+    parts.append("<h2>Summary</h2>")
+    parts.append("<div class='summary'>")
+    stat_pairs = [
+        ("Total", len(result.entries)),
+        ("Registry", counts.get("Registry", 0)),
+        ("Startup", counts.get("Startup", 0)),
+        ("Tasks", counts.get("Scheduled Task", 0)),
+        ("Services", counts.get("Service", 0)),
+        ("WMI", counts.get("WMI", 0)),
+        ("Flagged", result.flagged_count),
+        ("Unsigned", result.unsigned_count),
+        ("Missing", result.missing_target_count),
+    ]
+    for label, value in stat_pairs:
+        cls = "warn" if value in ("Flagged", "Unsigned", "Missing") and False else ""
+        parts.append(f"<div class='stat'><b>{value}</b>{_esc(label)}</div>")
+    parts.append("</div>")
+
+    parts.append("<h2>Entries</h2>")
+    parts.append("<table>")
+    parts.append("<tr><th>Risk</th><th>Source</th><th>Name</th><th>Signer</th>"
+                 "<th>Path</th><th>User</th><th>Status</th><th>Indicators</th></tr>")
+    for e in result.entries:
+        inds = "<br>".join(_esc(i.label) for i in e.indicators)
+        path = e.short_path(90)
+        if e.file_state == "Missing":
+            path = f"<span class='missing'>{_esc(path)}</span>"
+        parts.append(
+            f"<tr><td>{_esc(e.risk_level)}</td>"
+            f"<td>{_esc(e.source)}</td>"
+            f"<td>{_esc(e.name)}</td>"
+            f"<td>{_esc(e.signer_status)}</td>"
+            f"<td class='mono'>{path}</td>"
+            f"<td>{_esc(e.user)}</td>"
+            f"<td>{_esc(e.status)}</td>"
+            f"<td class='dim'>{inds}</td></tr>")
+    parts.append("</table>")
+    parts.append("<div class='dim' style='margin-top:16px'>Generated by PersistMap - read only, "
+                 "does not modify the system.</div>")
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
+def export_html(result: ScanResult, file_path: str, errors: Optional[callable] = None) -> bool:
+    try:
+        with open(file_path, "w", encoding="utf-8") as fh:
+            fh.write(render_html(result))
+        return True
+    except OSError as exc:
+        if errors:
+            errors("HTML Export", f"{file_path}: {exc}")
+        return False
